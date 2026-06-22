@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dbweakcheck"
+version = "0.1.0"
+description = "Authorized weak-password checker for common database services."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "dbweakcheck contributors" }
+]
+keywords = ["database", "security", "audit", "password", "mysql", "postgresql", "redis"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Security",
+  "Topic :: Database",
+]
+dependencies = []
+
+[project.optional-dependencies]
+all = [
+  "oracledb>=2.4",
+  "psycopg[binary]>=3.2",
+  "pymssql>=2.3",
+  "pymysql>=1.1",
+  "redis>=5.0",
+]
+mysql = ["pymysql>=1.1"]
+mssql = ["pymssql>=2.3"]
+oracle = ["oracledb>=2.4"]
+postgresql = ["psycopg[binary]>=3.2"]
+redis = ["redis>=5.0"]
+dev = ["pytest>=8.0"]
+
+[project.urls]
+Repository = "https://github.com/hnytgl/dbweakcheck"
+Issues = "https://github.com/hnytgl/dbweakcheck/issues"
+
+[project.scripts]
+dbweakcheck = "dbweakcheck.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dbweakcheck"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
