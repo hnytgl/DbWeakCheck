@@ -125,3 +125,155 @@ def test_reveal_password_prints_raw_password(capsys) -> None:
     captured = capsys.readouterr()
     assert code == 0
     assert "password='root'" in captured.out
+
+def test_password_templates_expand_per_user_and_target() -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "--authorize",
+            "--db",
+            "postgresql",
+            "--host",
+            "db01.internal",
+            "--database",
+            "appdb",
+            "--user",
+            "postgres",
+            "--user",
+            "app",
+            "--password",
+            "static",
+            "--password-template",
+            "{user}@{database}",
+            "--password-template",
+            "{host_label}{port}",
+        ]
+    )
+
+    attempts = cli.collect_attempts(args)
+
+    assert attempts == [
+        cli.CredentialAttempt("postgres", "static"),
+        cli.CredentialAttempt("postgres", "postgres@appdb"),
+        cli.CredentialAttempt("postgres", "db015432"),
+        cli.CredentialAttempt("postgres", "app@appdb"),
+        cli.CredentialAttempt("app", "static"),
+        cli.CredentialAttempt("app", "postgres@appdb"),
+        cli.CredentialAttempt("app", "db015432"),
+        cli.CredentialAttempt("app", "app@appdb"),
+    ]
+
+
+def test_password_template_rejects_unknown_placeholder() -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "--authorize",
+            "--db",
+            "mysql",
+            "--host",
+            "127.0.0.1",
+            "--user",
+            "root",
+            "--password-template",
+            "{unknown}",
+        ]
+    )
+
+    try:
+        cli.collect_attempts(args)
+    except ValueError as exc:
+        assert "Unknown password template placeholder: unknown" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_max_attempts_limits_generated_combinations() -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "--authorize",
+            "--db",
+            "redis",
+            "--host",
+            "127.0.0.1",
+            "--user",
+            "default",
+            "--user",
+            "admin",
+            "--password",
+            "redis",
+            "--password",
+            "admin",
+            "--max-attempts",
+            "3",
+        ]
+    )
+
+    try:
+        cli.collect_attempts(args)
+    except ValueError as exc:
+        assert "exceeds --max-attempts 3" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_summary_includes_status_counts(capsys) -> None:
+    def checker(target: cli.TargetConfig, username: str, password: str) -> tuple[bool, str]:
+        return password == "secret", "login accepted" if password == "secret" else "denied"
+
+    code = cli.main(
+        [
+            "--authorize",
+            "--db",
+            "mysql",
+            "--host",
+            "localhost",
+            "--user",
+            "root",
+            "--password",
+            "bad",
+            "--password",
+            "secret",
+            "--continue-after-success",
+        ],
+        checkers={"mysql": checker},
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "found=1" in captured.out
+    assert "failed=1" in captured.out
+
+def test_delay_wait_stops_before_calling_checker_after_success() -> None:
+    target = cli.TargetConfig(
+        db_type="mysql",
+        host="localhost",
+        port=3306,
+        database=None,
+        service_name=None,
+        sid=None,
+        timeout=1.0,
+    )
+    attempts = [
+        cli.CredentialAttempt("root", "secret"),
+        cli.CredentialAttempt("root", "later"),
+    ]
+    seen: list[str] = []
+
+    def checker(target: cli.TargetConfig, username: str, password: str) -> tuple[bool, str]:
+        seen.append(password)
+        return password == "secret", "login accepted"
+
+    results = cli.run_checks(
+        target,
+        attempts,
+        checker,
+        max_workers=1,
+        delay=0.01,
+        stop_on_success=True,
+    )
+
+    assert seen == ["secret"]
+    assert any(result.status == "found" for result in results)
+

@@ -68,6 +68,22 @@ dbweakcheck --authorize `
   --empty-password
 ```
 
+
+使用模板派生本地审计常见口令，减少手工维护字典：
+
+```powershell
+dbweakcheck --authorize `
+  --db postgresql `
+  --host db01.internal `
+  --database appdb `
+  --user postgres `
+  --user app `
+  --password-file .\passwords.txt `
+  --password-template "{user}@{database}" `
+  --password-template "{host_label}{port}" `
+  --max-attempts 5000
+```
+
 检查 MSSQL：
 
 ```powershell
@@ -115,6 +131,8 @@ dbweakcheck --authorize `
 - `--password`：要测试的口令，可重复传入。
 - `--password-file`：口令字典文件，每行一个口令。
 - `--empty-password`：额外测试空口令。
+- `--password-template`：按用户和目标信息派生口令，支持 `{user}`、`{username}`、`{db}`、`{database}`、`{host}`、`{host_label}`、`{port}`，可重复传入。
+- `--max-attempts 10000`：限制最终生成的用户名和口令组合数量，避免误把超大字典打到目标服务上。
 - `--dry-run`：只显示计划尝试次数，不发起连接。
 - `--max-workers 4`：设置并发数量。
 - `--delay 0.5`：每次尝试前等待的秒数。
@@ -130,6 +148,8 @@ dbweakcheck --authorize `
 默认情况下，工具会隐藏口令，例如把 `secret` 显示为 `s****t`。如果需要在本地审计报告中保留明文口令，可以显式添加 `--reveal-password`。
 
 使用 `--json-output` 或 `--csv-output` 导出结果时，同样默认脱敏；只有添加 `--reveal-password` 后才会写入明文口令。
+
+结束摘要会按状态统计结果，例如 `found=1, failed=20, skipped=3`，方便快速区分有效口令、认证失败、缺少驱动或网络错误。默认发现有效口令后会停止提交后续组合；添加 `--continue-after-success` 后会继续完整测试。
 
 ## 开发
 

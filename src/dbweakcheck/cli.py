@@ -5,6 +5,7 @@ import csv
 import json
 import sys
 import time
+from collections import Counter
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -112,9 +113,46 @@ def collect_values(direct: Sequence[str], file_path: str | None, *, label: str) 
     return unique_preserve_order(values)
 
 
+def build_template_context(target: TargetConfig, users: Sequence[str]) -> dict[str, str]:
+    host_label = target.host.split(".", maxsplit=1)[0]
+    return {
+        "db": target.db_type,
+        "database": target.database or target.service_name or target.sid or target.db_type,
+        "host": target.host,
+        "host_label": host_label,
+        "port": str(target.port),
+        "user": users[0] if users else "",
+        "username": users[0] if users else "",
+    }
+
+
+def expand_password_templates(
+    templates: Sequence[str],
+    *,
+    users: Sequence[str],
+    target: TargetConfig,
+) -> list[str]:
+    passwords: list[str] = []
+    base_context = build_template_context(target, users)
+    for user in users:
+        context = {**base_context, "user": user, "username": user}
+        for template in templates:
+            try:
+                passwords.append(template.format_map(context))
+            except KeyError as exc:
+                missing = exc.args[0]
+                raise ValueError(f"Unknown password template placeholder: {missing}") from exc
+            except ValueError as exc:
+                raise ValueError(f"Invalid password template {template!r}: {exc}") from exc
+    return unique_preserve_order(passwords)
+
+
 def collect_attempts(args: argparse.Namespace) -> list[CredentialAttempt]:
     users = collect_values(args.user or [], args.user_file, label="User")
     passwords = collect_values(args.password or [], args.password_file, label="Password")
+    target = build_target(args)
+    if args.password_template:
+        passwords.extend(expand_password_templates(args.password_template, users=users, target=target))
     if args.empty_password:
         passwords.insert(0, "")
         passwords = unique_preserve_order(passwords)
@@ -122,7 +160,10 @@ def collect_attempts(args: argparse.Namespace) -> list[CredentialAttempt]:
         raise ValueError("At least one --user or --user-file value is required.")
     if not passwords:
         raise ValueError("At least one --password, --password-file, or --empty-password value is required.")
-    return [CredentialAttempt(username=user, password=password) for user in users for password in passwords]
+    attempts = [CredentialAttempt(username=user, password=password) for user in users for password in passwords]
+    if len(attempts) > args.max_attempts:
+        raise ValueError(f"Planned {len(attempts)} attempts exceeds --max-attempts {args.max_attempts}.")
+    return attempts
 
 
 def build_target(args: argparse.Namespace) -> TargetConfig:
@@ -282,8 +323,8 @@ def run_one(
 ) -> CheckResult:
     if stop_event.is_set():
         return result_from_attempt(target, attempt, False, "skipped", "stopped after a previous success", 0)
-    if delay > 0:
-        time.sleep(delay)
+    if delay > 0 and stop_event.wait(delay):
+        return result_from_attempt(target, attempt, False, "skipped", "stopped after a previous success", 0)
     start = time.monotonic()
     try:
         found, message = checker(target, attempt.username, attempt.password)
@@ -341,14 +382,26 @@ def run_checks(
             done, _ = wait(futures, return_when=FIRST_COMPLETED)
             for future in done:
                 futures.pop(future, None)
+                if future.cancelled():
+                    continue
                 result = future.result()
                 results.append(result)
                 if result.found and stop_on_success:
                     stop_event.set()
+                    for pending_future in futures:
+                        pending_future.cancel()
             while len(futures) < max_workers:
                 if not submit_next(executor):
                     break
     return results
+
+
+def summarize_results(results: Sequence[CheckResult]) -> str:
+    by_status = Counter(result.status for result in results)
+    details = ", ".join(f"{status}={count}" for status, count in sorted(by_status.items()))
+    suffix = f" ({details})" if details else ""
+    found_count = by_status.get("found", 0)
+    return f"Checked {len(results)} attempt(s); found {found_count} valid credential(s){suffix}."
 
 
 def render_result(result: CheckResult, *, reveal_password: bool) -> str:
@@ -390,7 +443,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--user-file", default=None, help="UTF-8 file with one username per line.")
     parser.add_argument("--password", action="append", default=[], help="Password to test. Repeatable.")
     parser.add_argument("--password-file", default=None, help="UTF-8 dictionary file with one password per line.")
+    parser.add_argument(
+        "--password-template",
+        action="append",
+        default=[],
+        help=(
+            "Password template expanded per user. Available placeholders: "
+            "{user}, {username}, {db}, {database}, {host}, {host_label}, {port}. Repeatable."
+        ),
+    )
     parser.add_argument("--empty-password", action="store_true", help="Also test an empty password.")
+    parser.add_argument("--max-attempts", type=int, default=10000, help="Safety limit for generated credential attempts.")
     parser.add_argument("--timeout", type=float, default=3.0, help="Connection timeout in seconds.")
     parser.add_argument("--delay", type=float, default=0.0, help="Delay before each attempt in seconds.")
     parser.add_argument("--max-workers", type=int, default=4, help="Maximum concurrent login attempts.")
@@ -419,6 +482,9 @@ def main(argv: list[str] | None = None, *, checkers: dict[str, Checker] | None =
     if args.delay < 0:
         print("Error: --delay cannot be negative.", file=sys.stderr)
         return 2
+    if args.max_attempts < 1:
+        print("Error: --max-attempts must be at least 1.", file=sys.stderr)
+        return 2
 
     try:
         target = build_target(args)
@@ -446,7 +512,7 @@ def main(argv: list[str] | None = None, *, checkers: dict[str, Checker] | None =
             print(render_result(result, reveal_password=args.reveal_password))
 
     found_count = sum(1 for result in results if result.found)
-    print(f"Checked {len(results)} attempt(s); found {found_count} valid credential(s).")
+    print(summarize_results(results))
     if args.json_output:
         write_json(args.json_output, results, reveal_password=args.reveal_password)
     if args.csv_output:
